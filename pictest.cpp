@@ -20,6 +20,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <math.h>
 #include <iostream>
 #include "hidapi.h"
 
@@ -31,18 +32,33 @@
 #endif
 
 int sendPIC(hid_device *handle, unsigned char *buf);
+int sendPIC(hid_device *handle, std::string cmd); 
 int readPIC(hid_device *handle, unsigned char *buf);
 
 int main(int argc, char* argv[])
 {
 	int res;
-	unsigned char buf[256];
 #define MAX_STR 255
 	wchar_t wstr[MAX_STR];
 	hid_device *handle = NULL;
 	unsigned short VID = 0x04d8;
 	unsigned short PID = 0xf2bf;
+	unsigned char buf[255];
+	std::string cmd = "";
 	int i;
+	
+	std::string readSerialNumber = "B205250001";
+	std::string readGPS = "B20322";
+	std::string readRadar = "B20323";
+	std::string readTrigger = "B20324";
+	std::string turnLEDOn = "B205410001";
+	std::string turnLEDOff = "B205410000";
+	std::string turnMIC1On = "B20632000201";
+	std::string turnMIC1Off = "B20632000200";
+	std::string turnMIC2On = "B20632000101";
+	std::string turnMIC2Off = "B20632000101";
+	std::string setHeartbeatOn = "B204F101";
+	std::string setHeartbeatOff = "B204F102";	
 
 #ifdef WIN32
 	UNREFERENCED_PARAMETER(argc);
@@ -67,9 +83,6 @@ int main(int argc, char* argv[])
 		cur_dev = cur_dev->next;
 	}
 	hid_free_enumeration(devs);
-
-	// Set up the command buffer.
-	memset(buf, 0x00, sizeof(buf));
 
 	// Open the device using the VID, PID,
 	handle = hid_open(VID, PID, NULL);
@@ -107,31 +120,31 @@ int main(int argc, char* argv[])
 	// data here, but execution should not block.
 	res = hid_read(handle, buf, 64);
 
-	memset(buf, 0, sizeof(buf));
-
 	// Read the serial number (cmd 0x25). The first byte is always (0xB2).
-	buf[0] = 0xB2;
-	buf[1] = 0x05;
-	buf[2] = 0x25; // Read Device ID
-	buf[3] = 0x00;
-	buf[4] = 0x01;
-	res = sendPIC(handle, buf);
+	cmd = readSerialNumber;
+	res = sendPIC(handle, cmd);
 	if (res < 0)
 	{
 		printf("Unable to write()\n");
 		printf("Error: %ls\n", hid_error(handle));
 	}
+	cmd = "";
 
 	// Read requested state. hid_read() has been set to be
 	// non-blocking by the call to hid_set_nonblocking() above.
 	// This loop demonstrates the non-blocking nature of hid_read().
-	clock_t t0 = clock() + CLOCKS_PER_SEC / 8;
+	int intervalTime = rint(CLOCKS_PER_SEC / 8);
+	clock_t t0 = clock() + intervalTime;
 	clock_t t;
 
 	res = 0;
 	int count = 0;
 	std::string dataGPS = "";
-	printf("Start dialogue with the PIC\n");
+	std::string triggers = "";
+	std::string lastTriggers = "";
+	memset(buf, 0, sizeof(buf));
+	printf("%d %d \n", CLOCKS_PER_SEC, intervalTime);
+	printf("Start dialogue with the PIC.\n");
 	while (true)
 	{
 		t = clock();
@@ -147,70 +160,85 @@ int main(int argc, char* argv[])
 			//printf("Get reply from PIC, length=%d, data=", buf[1]);
 			switch (buf[2])
 			{
-			case 0x22 : // GPS reading
-			case 0x25 : // Serial number
-				for (i = 3; i < buf[1] - 1; i++)
-					printf("%c", buf[i]);
-				printf("\n");
-				break;
-			case 0x24 :  // Trigger
-				for (i = 3; i < buf[1] - 2; i++)
-				{
-					if ((i-2) % 4 == 0)
-						printf(" ");
-					if (buf[i])
-						printf("^");
-					else
-						printf("_");
-				}
-				printf("\n");
-				break;
-			case 0x41 : // LED reading
-				break;
-			default :
-				for (unsigned short i = 0; i < buf[1] + 1; i++)
-					printf("%02hx ", buf[i]);
-				printf("\n");
+				case 0x22 : // GPS reading
+				case 0x25 : // Serial number
+					printf("\n%d ", t);
+					for (i = 3; i < buf[1] - 1; i++)
+						printf("%c", buf[i]);
+					break;
+					
+				case 0x24 :  // Trigger
+					triggers = "";
+					for (i = 3; i < buf[1] - 2; i++)
+					{
+						if ((i-2) % 4 == 0)
+							triggers.append(" ");
+						if (buf[i])
+							triggers.append("^");
+						else
+							triggers.append("_");
+					}
+					
+					if (triggers != lastTriggers)
+					{
+						printf("\n%d Triggers: %s", t, triggers.c_str());
+						lastTriggers = triggers;
+					}
+					break;
+					
+				case 0x41 : // LED reading
+					break;
+					
+				default :
+					for (unsigned short i = 0; i < buf[1] + 1; i++)
+						printf("%02hx ", buf[i]);
+					printf("\n");
 			}
+			
+		
+			if (cmd.length() > 2)
+			{
+				// wait 5ms before send new command
+				nanosleep((const struct timespec[]){{0, 1000000L}}, NULL);
+				res = sendPIC(handle, cmd);
+				cmd = "";
+				if (res < 0)
+				{
+					printf("Unable to write to PIC\n");
+					printf("Error: %ls\n", hid_error(handle));
+				}
+			}
+			memset(buf, 0, sizeof(buf));
 		}
 
 		if (t > t0)
 		{
-			t0 += CLOCKS_PER_SEC / 4;
+			t0 += intervalTime;
 			count++;
-			//printf("Count = %d\n", count);
-
-			switch (count % 4)
-			{
-			case 0 :  // turn LED off
-				buf[1] = 0x05;
-				buf[2] = 0x41;
-				buf[3] = 0x00;
-				buf[4] = 0x00;
-				break;
-			case 1 :  // read GPS
-				buf[1] = 0x03;
-				buf[2] = 0x22;
-				break;
-			case 2 : // turn LED on
-				buf[1] = 0x05;
-				buf[2] = 0x41;
-				buf[3] = 0x00;
-				buf[4] = 0x01;
-				break;
-			case 3 : // read Trigger
-				buf[1] = 0x03;
-				buf[2] = 0x24;
-				break;
-			}
-			res = sendPIC(handle, buf);
+			cmd = readTrigger;
+			res = sendPIC(handle, cmd);
+			cmd = "";
 			if (res < 0)
 			{
-				printf("Unable to write()\n");
+				printf("Unable to write to PIC\n");
 				printf("Error: %ls\n", hid_error(handle));
 			}
+
+			switch (count)
+			{
+				case 1 :  // turn LED off
+					cmd = turnLEDOff;
+					break;
+				case 2 :  // read GPS
+					cmd = readGPS;
+					break;
+				case 5 : // turn LED on
+					cmd = turnLEDOn;
+					break;
+			}
+			if (count > 8)
+				count = 0;
 		}
-		//usleep(10);
 	}
 
 	printf("Data read:\n   ");
@@ -258,3 +286,31 @@ int readPIC(hid_device *handle, unsigned char *buf)
 {
 	return hid_read(handle, buf, 65);
 }
+
+int sendPIC(hid_device *handle, std::string cmd)
+{
+	int len = cmd.length();
+	// the command shall not be less that 6 characters
+	if (len < 6 || len % 2 == 1 || len > 40) 
+		return -1;
+	
+	unsigned char buf[65];
+	unsigned char crc = 0;
+	
+	memset(buf, 0, sizeof(buf));
+	buf[0] = 0xB2;
+	len = len / 2;
+	for (int i = 0; i < len; i++)
+	{
+		buf[i] = std::stoi(cmd.substr(i + i, 2), nullptr, 16) & 0xFF;
+		crc += buf[i];
+	}
+	crc = (crc ^ 0xFF) + 1;
+	len = buf[1] & 0xFF;	
+	buf[len] = crc;
+
+	if (len < 3 || len > 20)
+		return -1;
+	
+	return hid_write(handle, buf, len + 1);
+};
