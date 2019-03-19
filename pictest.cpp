@@ -1,18 +1,11 @@
 #include <cstdio>
 /*******************************************************
- Windows HID simplification
+ PIC reader based on HIDAPI
 
- Alan Ott
- Signal 11 Software
+ George Sun
+ A-Concept Inc. 
 
- 8/22/2009
-
- Copyright 2009
-
- This contents of this file may be used by anyone
- for any reason without any conditions and may be
- used as a starting point for your own applications
- which use HIDAPI.
+ 03/22/2019
 ********************************************************/
 
 #include <stdio.h>
@@ -31,8 +24,9 @@
 #include <unistd.h>
 #endif
 
-int sendPIC(hid_device *handle, std::string *cmd); 
-int readPIC(hid_device *handle, unsigned char *buf);
+using namespace std;
+
+int sendPIC(hid_device *handle, string *cmd); 
 
 int main(int argc, char* argv[])
 {
@@ -43,51 +37,36 @@ int main(int argc, char* argv[])
 	unsigned short VID = 0x04d8;
 	unsigned short PID = 0xf2bf;
 	unsigned char buf[255];
-	std::string cmd = "";
+	string commandQueue = "";
 	int i;
 	
-	std::string readSerialNumber = "B20525000100";
-	std::string readGPS = "B2032200";
-	std::string readRadar = "B2032300";
-	std::string readTrigger = "B2032400";
-	std::string readFirmwareVersion = "B204250700";
-	std::string readHardwareVersion = "B20525080100";
-	std::string turnLEDOn = "B20541000100";
-	std::string turnLEDOff = "B20541000000";
-	std::string turnMIC1On = "B2063200020100";
-	std::string turnMIC1Off = "B2063200020000";
-	std::string turnMIC2On = "B2063200010100";
-	std::string turnMIC2Off = "B2063200010100";
-	std::string setHeartbeatOn = "B204F10100";
-	std::string setHeartbeatOff = "B204F10200";	
+	string readSerialNumber = "B20525000100";
+	string readGPS = "B2032200";
+	string readRadar = "B2032300";
+	string readTrigger = "B2032400";
+	string readFirmwareVersion = "B204250700";
+	string readHardwareVersion = "B20525080100";
+	string turnLEDOn = "B20541000100";
+	string turnLEDOff = "B20541000000";
+	string turnMIC1On = "B2063200020100";
+	string turnMIC1Off = "B2063200020000";
+	string turnMIC2On = "B2063200010100";
+	string turnMIC2Off = "B2063200010100";
+	string setHeartbeatOn = "B204F10100";
+	string setHeartbeatOff = "B204F10200";	
 
 #ifdef WIN32
 	UNREFERENCED_PARAMETER(argc);
 	UNREFERENCED_PARAMETER(argv);
 #endif
 
-	struct hid_device_info *devs, *cur_dev;
-
 	if (hid_init())
 		return -1;
 
-	devs = hid_enumerate(0x0, 0x0);
-	cur_dev = devs;
-	while (cur_dev) {
-		printf("Device Found\n  type: %04hx %04hx\n  path: %s\n  serial_number: %ls", cur_dev->vendor_id, cur_dev->product_id, cur_dev->path, cur_dev->serial_number);
-		printf("\n");
-		printf("  Manufacturer: %ls\n", cur_dev->manufacturer_string);
-		printf("  Product:      %ls\n", cur_dev->product_string);
-		printf("  Release:      %hx\n", cur_dev->release_number);
-		printf("  Interface:    %d\n", cur_dev->interface_number);
-		printf("\n");
-		cur_dev = cur_dev->next;
-	}
-	hid_free_enumeration(devs);
-
 	// Open the device using the VID, PID,
 	handle = hid_open(VID, PID, NULL);
-	if (!handle) {
+	if (!handle) 
+	{
 		printf("unable to open device\n");
 		return 1;
 	}
@@ -97,7 +76,7 @@ int main(int argc, char* argv[])
 	res = hid_get_manufacturer_string(handle, wstr, MAX_STR);
 	if (res < 0)
 		printf("Unable to read manufacturer string\n");
-	printf("Manufacturer String: %ls\n", wstr);
+	printf("\nManufacturer String: %ls\n", wstr);
 
 	// Read the Product String
 	wstr[0] = 0x0000;
@@ -111,20 +90,14 @@ int main(int argc, char* argv[])
 	res = hid_get_serial_number_string(handle, wstr, MAX_STR);
 	if (res < 0)
 		printf("Unable to read serial number string\n");
-	printf("Serial Number String: (%d) %ls", wstr[0], wstr);
-	printf("\n");
+	printf("Serial Number String: (%d) %ls\n\n", wstr[0], wstr);
 
 	// Set the hid_read() function to be non-blocking.
 	hid_set_nonblocking(handle, 1);
 
-	// Try to read from the device. There shoud be no
-	// data here, but execution should not block.
-	res = hid_read(handle, buf, 64);
-
 	// Read the serial number (cmd 0x25). The first byte is always (0xB2).
-	cmd = turnMIC1On + readHardwareVersion + readSerialNumber + readFirmwareVersion;
-	printf("Commands in queue: %s\n", cmd.c_str());
-	res = sendPIC(handle, &cmd);
+	commandQueue = turnMIC1On + readSerialNumber + readHardwareVersion + readFirmwareVersion;
+	res = sendPIC(handle, &commandQueue);
 	if (res < 0)
 	{
 		printf("Unable to write()\n");
@@ -134,44 +107,52 @@ int main(int argc, char* argv[])
 	// Read requested state. hid_read() has been set to be
 	// non-blocking by the call to hid_set_nonblocking() above.
 	// This loop demonstrates the non-blocking nature of hid_read().
-	/*
-	long intervalTime = 100 * 1000; // 100ms
-	long dt = 0;
-	struct timeval tv, tv0;
-	gettimeofday(&tv0, nullptr);
-	*/
 	int intervalTime = rint(CLOCKS_PER_SEC / 10);
-	clock_t t0 = clock() + intervalTime;
+	clock_t timerSafeWrite = clock() + intervalTime;  // timer used to tracking safe writing of new commands to PIC
+	clock_t timerPeriodicCommands = timerSafeWrite;	// timer used to tracking periodic commands 
 	clock_t t;
 
 	res = 0;
 	int count = 0;
-	std::string dataGPS = "";
-	std::string triggers = "";
-	std::string lastTriggers = "";
+	string triggers = "";
+	string lastTriggers = "";
 	memset(buf, 0, sizeof(buf));
 	printf("Start dialogue with the PIC.\n");
 	while (true)
 	{
-		//gettimeofday(&tv, nullptr);
 		t = clock();
+
+		// Try to read from the PIC
 		res = hid_read(handle, buf, sizeof(buf));
 		if (res < 0)
 		{
-			printf("Unable to read()\n");
+			printf("Unable to read from the PIC.\n");
+			printf("Error: %ls\n", hid_error(handle));
 			break;
 		}
 
+		// Parse the reading from the PIC
 		if (res > 0)
-		{	
+		{
+			timerSafeWrite = t + rint(CLOCKS_PER_SEC / 1000); // 1ms secured timer
+			i = buf[1];
+			buf[i] = 0;
+			string ID = "Serial Number";
+
 			switch (buf[2])
 			{
 				case 0x22 : // GPS reading
-				case 0x25 : // Serial number
-					//printf("\r%ld.%06ld \t", tv.tv_sec, tv.tv_usec);
-					printf("\r%ld \t", t);
+					printf("\r%ld GPS: ", t);
 					for (i = 3; i < buf[1]; i++)
 						printf("%c", buf[i]);
+					break;
+					
+				case 0x25 : // Serial number
+					if (buf[3] > 47 && buf[3] < 58)
+						ID = "Firmware version";
+					if (i > 20)
+						ID = "Hardware version";
+					printf("\n%ld %d %s: %s", t, i, ID.c_str(), buf + 3);
 					break;
 					
 				case 0x24 :  // Trigger
@@ -189,7 +170,6 @@ int main(int argc, char* argv[])
 					
 					if (triggers != lastTriggers)
 					{
-						//printf("\n%ld.%06ld Triggers: %s\n", tv.tv_sec, tv.tv_usec, triggers.c_str());
 						printf("\n%ld Triggers: %s\n", t, triggers.c_str());
 						lastTriggers = triggers;
 					}
@@ -205,69 +185,45 @@ int main(int argc, char* argv[])
 					printf("\n");
 			}
 			
-		
-			if (cmd.length() > 2)
-			{
-				// wait 1ms before send new command
-				nanosleep((const struct timespec[]){{0, 1000000L}}, NULL);
-				//printf("\nCommands in queue %s before sending to PIC. ", cmd.c_str());
-				res = sendPIC(handle, &cmd);
-				if (res < 0)
-				{
-					printf("Unable to write to PIC. %s\n", cmd.c_str());
-					printf("Error: %ls\n", hid_error(handle));
-				}
-			}
 			memset(buf, 0, sizeof(buf));
 			fflush(stdout);
 		}
-
-		//if ((tv.tv_sec - tv0.tv_sec) * 1000000 + tv.tv_usec - tv0.tv_usec > intervalTime)
-		if (t > t0)
+		
+		// Check if it is time to add a periodic command
+		if (t > timerPeriodicCommands)
 		{
-			/*
-			tv0.tv_usec += intervalTime;
-			if (tv0.tv_usec >= 1000000)
-			{
-				tv0.tv_sec++;
-				tv0.tv_usec -= 1000000;
-			}
-			*/
-			t0 += intervalTime;
-			
+			timerSafeWrite = timerPeriodicCommands;  // always safe to send PIC a new command in new cycle
+			timerPeriodicCommands += intervalTime;
 			count++;
-			cmd.append(readTrigger);
-			res = sendPIC(handle, &cmd);
-			if (res < 0)
-			{
-				printf("Unable to write to PIC\n");
-				printf("Error: %ls %s\n", hid_error(handle), cmd.c_str());
-			}
-
-			//cmd = "";
-			switch (count)
-			{
-				case 1 :  // turn LED off
-					cmd.append(turnLEDOff);
-					break;
-				case 2 :  // read GPS
-					cmd.append(readGPS);
-					break;
-				case 6 : // turn LED on
-					cmd.append(turnLEDOn);
-					break;
-			}
-			
 			if (count >= 10)
 				count = 0;
-		}
-	}
 
-	printf("Data read:\n   ");
-	// Print out the returned buffer.
-	for (i = 0; i < res; i++)
-		printf("%02hhx ", buf[i]);
-	printf("\n");
+			commandQueue.append(readTrigger);
+			switch (count)
+			{
+				case 0 :  // turn LED off
+					commandQueue.append(turnLEDOff);
+					break;
+				case 1 :  // read GPS
+					commandQueue.append(readGPS);
+					break;
+				case 5 : // turn LED on
+					commandQueue.append(turnLEDOn);
+			}			
+		}
+
+		// Check if it is safe to send a new command to PIC
+		if (t > timerSafeWrite && commandQueue.length() > 2)
+		{
+			timerSafeWrite = timerPeriodicCommands; // hold next sending till successful read or next new command
+			res = sendPIC(handle, &commandQueue);
+			if (res < 0)
+			{
+				printf("Unable to write to the PIC. %s\n", commandQueue.c_str());
+				printf("Error: %ls\n", hid_error(handle));
+			}			
+		}	
+	}
 
 	hid_close(handle);
 
@@ -281,19 +237,14 @@ int main(int argc, char* argv[])
 	return 0;
 }
 
-int readPIC(hid_device *handle, unsigned char *buf)
-{
-	return hid_read(handle, buf, 65);
-}
-
-int sendPIC(hid_device *handle, std::string *cmd)
+int sendPIC(hid_device *handle, string *cmd)
 {
 	int len = cmd->length();
 	// the command shall be lat least 6 characters and in even number length
-	if (len < 6 || len % 2 == 1)
+	if (len < 6)
 	{
 		cmd->assign("");
-		return -1;
+		return 0;
 	}
 	
 	unsigned char buf[65];
@@ -305,7 +256,7 @@ int sendPIC(hid_device *handle, std::string *cmd)
 	len = len / 2;
 	for (int i = 0; i < buf[1] + 1; i++)
 	{
-		buf[i] = std::stoi(cmd->substr(i + i, 2), nullptr, 16) & 0xFF;
+		buf[i] = stoi(cmd->substr(i + i, 2), nullptr, 16) & 0xFF;
 		crc += buf[i];
 	}
 	crc = (crc ^ 0xFF) + 1;
