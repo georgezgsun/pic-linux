@@ -19,7 +19,7 @@
 #include <wchar.h>
 #include <string.h>
 #include <stdlib.h>
-#include <time.h>
+#include <sys/time.h>
 #include <math.h>
 #include <iostream>
 #include "hidapi.h"
@@ -31,8 +31,7 @@
 #include <unistd.h>
 #endif
 
-int sendPIC(hid_device *handle, unsigned char *buf);
-int sendPIC(hid_device *handle, std::string cmd); 
+int sendPIC(hid_device *handle, std::string *cmd); 
 int readPIC(hid_device *handle, unsigned char *buf);
 
 int main(int argc, char* argv[])
@@ -47,18 +46,20 @@ int main(int argc, char* argv[])
 	std::string cmd = "";
 	int i;
 	
-	std::string readSerialNumber = "B205250001";
-	std::string readGPS = "B20322";
-	std::string readRadar = "B20323";
-	std::string readTrigger = "B20324";
-	std::string turnLEDOn = "B205410001";
-	std::string turnLEDOff = "B205410000";
-	std::string turnMIC1On = "B20632000201";
-	std::string turnMIC1Off = "B20632000200";
-	std::string turnMIC2On = "B20632000101";
-	std::string turnMIC2Off = "B20632000101";
-	std::string setHeartbeatOn = "B204F101";
-	std::string setHeartbeatOff = "B204F102";	
+	std::string readSerialNumber = "B20525000100";
+	std::string readGPS = "B2032200";
+	std::string readRadar = "B2032300";
+	std::string readTrigger = "B2032400";
+	std::string readFirmwareVersion = "B204250700";
+	std::string readHardwareVersion = "B20525080100";
+	std::string turnLEDOn = "B20541000100";
+	std::string turnLEDOff = "B20541000000";
+	std::string turnMIC1On = "B2063200020100";
+	std::string turnMIC1Off = "B2063200020000";
+	std::string turnMIC2On = "B2063200010100";
+	std::string turnMIC2Off = "B2063200010100";
+	std::string setHeartbeatOn = "B204F10100";
+	std::string setHeartbeatOff = "B204F10200";	
 
 #ifdef WIN32
 	UNREFERENCED_PARAMETER(argc);
@@ -121,19 +122,25 @@ int main(int argc, char* argv[])
 	res = hid_read(handle, buf, 64);
 
 	// Read the serial number (cmd 0x25). The first byte is always (0xB2).
-	cmd = readSerialNumber;
-	res = sendPIC(handle, cmd);
+	cmd = turnMIC1On + readHardwareVersion + readSerialNumber + readFirmwareVersion;
+	printf("Commands in queue: %s\n", cmd.c_str());
+	res = sendPIC(handle, &cmd);
 	if (res < 0)
 	{
 		printf("Unable to write()\n");
 		printf("Error: %ls\n", hid_error(handle));
 	}
-	cmd = "";
 
 	// Read requested state. hid_read() has been set to be
 	// non-blocking by the call to hid_set_nonblocking() above.
 	// This loop demonstrates the non-blocking nature of hid_read().
-	int intervalTime = rint(CLOCKS_PER_SEC / 8);
+	/*
+	long intervalTime = 100 * 1000; // 100ms
+	long dt = 0;
+	struct timeval tv, tv0;
+	gettimeofday(&tv0, nullptr);
+	*/
+	int intervalTime = rint(CLOCKS_PER_SEC / 10);
 	clock_t t0 = clock() + intervalTime;
 	clock_t t;
 
@@ -143,10 +150,10 @@ int main(int argc, char* argv[])
 	std::string triggers = "";
 	std::string lastTriggers = "";
 	memset(buf, 0, sizeof(buf));
-	printf("%d %d \n", CLOCKS_PER_SEC, intervalTime);
 	printf("Start dialogue with the PIC.\n");
 	while (true)
 	{
+		//gettimeofday(&tv, nullptr);
 		t = clock();
 		res = hid_read(handle, buf, sizeof(buf));
 		if (res < 0)
@@ -156,37 +163,40 @@ int main(int argc, char* argv[])
 		}
 
 		if (res > 0)
-		{
-			//printf("Get reply from PIC, length=%d, data=", buf[1]);
+		{	
 			switch (buf[2])
 			{
 				case 0x22 : // GPS reading
 				case 0x25 : // Serial number
-					printf("\n%d ", t);
-					for (i = 3; i < buf[1] - 1; i++)
+					//printf("\r%ld.%06ld \t", tv.tv_sec, tv.tv_usec);
+					printf("\r%ld \t", t);
+					for (i = 3; i < buf[1]; i++)
 						printf("%c", buf[i]);
 					break;
 					
 				case 0x24 :  // Trigger
 					triggers = "";
-					for (i = 3; i < buf[1] - 2; i++)
+					for (i = 3; i < buf[1] - 1; i++)
 					{
-						if ((i-2) % 4 == 0)
-							triggers.append(" ");
 						if (buf[i])
 							triggers.append("^");
 						else
 							triggers.append("_");
+						
+						if ((i-2) % 4 == 0)
+							triggers.append(" ");
 					}
 					
 					if (triggers != lastTriggers)
 					{
-						printf("\n%d Triggers: %s", t, triggers.c_str());
+						//printf("\n%ld.%06ld Triggers: %s\n", tv.tv_sec, tv.tv_usec, triggers.c_str());
+						printf("\n%ld Triggers: %s\n", t, triggers.c_str());
 						lastTriggers = triggers;
 					}
 					break;
 					
 				case 0x41 : // LED reading
+				case 0x32 : // MIC on/off
 					break;
 					
 				default :
@@ -198,45 +208,57 @@ int main(int argc, char* argv[])
 		
 			if (cmd.length() > 2)
 			{
-				// wait 5ms before send new command
+				// wait 1ms before send new command
 				nanosleep((const struct timespec[]){{0, 1000000L}}, NULL);
-				res = sendPIC(handle, cmd);
-				cmd = "";
+				//printf("\nCommands in queue %s before sending to PIC. ", cmd.c_str());
+				res = sendPIC(handle, &cmd);
 				if (res < 0)
 				{
-					printf("Unable to write to PIC\n");
+					printf("Unable to write to PIC. %s\n", cmd.c_str());
 					printf("Error: %ls\n", hid_error(handle));
 				}
 			}
 			memset(buf, 0, sizeof(buf));
+			fflush(stdout);
 		}
 
+		//if ((tv.tv_sec - tv0.tv_sec) * 1000000 + tv.tv_usec - tv0.tv_usec > intervalTime)
 		if (t > t0)
 		{
+			/*
+			tv0.tv_usec += intervalTime;
+			if (tv0.tv_usec >= 1000000)
+			{
+				tv0.tv_sec++;
+				tv0.tv_usec -= 1000000;
+			}
+			*/
 			t0 += intervalTime;
+			
 			count++;
-			cmd = readTrigger;
-			res = sendPIC(handle, cmd);
-			cmd = "";
+			cmd.append(readTrigger);
+			res = sendPIC(handle, &cmd);
 			if (res < 0)
 			{
 				printf("Unable to write to PIC\n");
-				printf("Error: %ls\n", hid_error(handle));
+				printf("Error: %ls %s\n", hid_error(handle), cmd.c_str());
 			}
 
+			//cmd = "";
 			switch (count)
 			{
 				case 1 :  // turn LED off
-					cmd = turnLEDOff;
+					cmd.append(turnLEDOff);
 					break;
 				case 2 :  // read GPS
-					cmd = readGPS;
+					cmd.append(readGPS);
 					break;
-				case 5 : // turn LED on
-					cmd = turnLEDOn;
+				case 6 : // turn LED on
+					cmd.append(turnLEDOn);
 					break;
 			}
-			if (count > 8)
+			
+			if (count >= 10)
 				count = 0;
 		}
 	}
@@ -259,50 +281,31 @@ int main(int argc, char* argv[])
 	return 0;
 }
 
-int sendPIC(hid_device *handle, unsigned char *buf)
-{
-	int index = buf[1] & 0xFF;
-	if (!buf || index < 3 || index > 63)
-		return -1;
-
-	buf[0] = 0xB2;  // 	the first byte is always B2
-
-	// Calculate the CRC
-	unsigned char crc = 0;
-	for (int i = 0; i < index; i++)
-	{
-		crc += buf[i];
-		//printf("%02hx ", buf[i]);
-	}
-	crc = (crc ^ 0xFF) + 1;
-	
-	buf[index] = crc; 
-	//printf("%02hx %04hx\n", buf[buf[1]], crc);
-
-	return hid_write(handle, buf, index+1);
-}
-
 int readPIC(hid_device *handle, unsigned char *buf)
 {
 	return hid_read(handle, buf, 65);
 }
 
-int sendPIC(hid_device *handle, std::string cmd)
+int sendPIC(hid_device *handle, std::string *cmd)
 {
-	int len = cmd.length();
-	// the command shall not be less that 6 characters
-	if (len < 6 || len % 2 == 1 || len > 40) 
+	int len = cmd->length();
+	// the command shall be lat least 6 characters and in even number length
+	if (len < 6 || len % 2 == 1)
+	{
+		cmd->assign("");
 		return -1;
+	}
 	
 	unsigned char buf[65];
 	unsigned char crc = 0;
 	
 	memset(buf, 0, sizeof(buf));
 	buf[0] = 0xB2;
+	buf[1] = 0x03; // assign an initial length
 	len = len / 2;
-	for (int i = 0; i < len; i++)
+	for (int i = 0; i < buf[1] + 1; i++)
 	{
-		buf[i] = std::stoi(cmd.substr(i + i, 2), nullptr, 16) & 0xFF;
+		buf[i] = std::stoi(cmd->substr(i + i, 2), nullptr, 16) & 0xFF;
 		crc += buf[i];
 	}
 	crc = (crc ^ 0xFF) + 1;
@@ -310,7 +313,17 @@ int sendPIC(hid_device *handle, std::string cmd)
 	buf[len] = crc;
 
 	if (len < 3 || len > 20)
+	{
+		cmd->assign("");
 		return -1;
+	}
+	
+	//printf("\n Original command: %s %d %s", cmd->c_str(), len, cmd->substr(len + 1).c_str());
+	if (buf[1] < cmd->length())
+		cmd->assign(cmd->substr(len + len + 2));
+	else
+		cmd->assign("");
+	//printf("\n Processed command: %s", cmd->c_str());
 	
 	return hid_write(handle, buf, len + 1);
 };
