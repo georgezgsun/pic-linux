@@ -107,7 +107,8 @@ int main(int argc, char* argv[])
 	// Read requested state. hid_read() has been set to be
 	// non-blocking by the call to hid_set_nonblocking() above.
 	// This loop demonstrates the non-blocking nature of hid_read().
-	int intervalTime = rint(CLOCKS_PER_SEC / 10);
+	int ticksEverySecond = 4;
+	int intervalTime = rint(CLOCKS_PER_SEC / ticksEverySecond);
 	clock_t timerSafeWrite = clock() + intervalTime;  // timer used to tracking safe writing of new commands to PIC
 	clock_t timerPeriodicCommands = timerSafeWrite;	// timer used to tracking periodic commands 
 	clock_t t;
@@ -195,7 +196,7 @@ int main(int argc, char* argv[])
 			timerSafeWrite = timerPeriodicCommands;  // always safe to send PIC a new command in new cycle
 			timerPeriodicCommands += intervalTime;
 			count++;
-			if (count >= 10)
+			if (count >= ticksEverySecond)
 				count = 0;
 
 			commandQueue.append(readTrigger);
@@ -207,7 +208,7 @@ int main(int argc, char* argv[])
 				case 1 :  // read GPS
 					commandQueue.append(readGPS);
 					break;
-				case 5 : // turn LED on
+				case 2 : // turn LED on
 					commandQueue.append(turnLEDOn);
 			}			
 		}
