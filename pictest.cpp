@@ -13,7 +13,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/time.h>
-#include <math.h>
 #include <iostream>
 #include "hidapi.h"
 
@@ -97,21 +96,16 @@ int main(int argc, char* argv[])
 
 	// Read the serial number (cmd 0x25). The first byte is always (0xB2).
 	commandQueue = turnMIC1On + readSerialNumber + readHardwareVersion + readFirmwareVersion;
-	res = sendPIC(handle, &commandQueue);
-	if (res < 0)
-	{
-		printf("Unable to write()\n");
-		printf("Error: %ls\n", hid_error(handle));
-	}
 
 	// Read requested state. hid_read() has been set to be
 	// non-blocking by the call to hid_set_nonblocking() above.
 	// This loop demonstrates the non-blocking nature of hid_read().
 	int ticksEverySecond = 4;
-	int intervalTime = rint(CLOCKS_PER_SEC / ticksEverySecond);
-	clock_t timerSafeWrite = clock() + intervalTime;  // timer used to tracking safe writing of new commands to PIC
-	clock_t timerPeriodicCommands = timerSafeWrite;	// timer used to tracking periodic commands 
+	int intervalTime = CLOCKS_PER_SEC / ticksEverySecond;
+	clock_t timerSafeWrite = 0;  // timer used to guard safe writing of new commands to PIC. 0 will allow immidiate writting in main loop
+	clock_t timerPeriodicCommands = clock() + intervalTime;	// timer used to tracking periodic commands. Next commands are added later.
 	clock_t t;
+	clock_t lastSend=0;
 
 	res = 0;
 	int count = 0;
@@ -122,20 +116,35 @@ int main(int argc, char* argv[])
 	while (true)
 	{
 		t = clock();
+		
+		if (!handle)
+		{
+			handle = hid_open(VID, PID, NULL);
+			if (!handle)
+				continue;
+			
+			commandQueue = "B2032700";
+			timerPeriodicCommands = t + intervalTime;
+			timerSafeWrite = timerPeriodicCommands;
+			hid_set_nonblocking(handle, 1);
+		}
 
 		// Try to read from the PIC
 		res = hid_read(handle, buf, sizeof(buf));
 		if (res < 0)
 		{
-			printf("Unable to read from the PIC.\n");
+			printf("\nUnable to read from the PIC.\n");
 			printf("Error: %ls\n", hid_error(handle));
-			break;
+			hid_close(handle);
+			hid_exit();
+			handle = 0;
+			continue;
 		}
 
 		// Parse the reading from the PIC
 		if (res > 0)
 		{
-			timerSafeWrite = t + rint(CLOCKS_PER_SEC / 1000); // 1ms secured timer
+			timerSafeWrite = t + CLOCKS_PER_SEC / 1000; // 1ms secured timer
 			i = buf[1];
 			buf[i] = 0;
 			string ID = "Serial Number";
@@ -143,7 +152,7 @@ int main(int argc, char* argv[])
 			switch (buf[2])
 			{
 				case 0x22 : // GPS reading
-					printf("\r%ld GPS: ", t);
+					printf("\r%ld %ld GPS: ", t, t-lastSend);
 					for (i = 3; i < buf[1]; i++)
 						printf("%c", buf[i]);
 					break;
@@ -153,7 +162,7 @@ int main(int argc, char* argv[])
 						ID = "Firmware version";
 					if (i > 20)
 						ID = "Hardware version";
-					printf("\n%ld %d %s: %s", t, i, ID.c_str(), buf + 3);
+					printf("\n%ld %ld %s: %s", t, t-lastSend, ID.c_str(), buf + 3);
 					break;
 					
 				case 0x24 :  // Trigger
@@ -171,7 +180,7 @@ int main(int argc, char* argv[])
 					
 					if (triggers != lastTriggers)
 					{
-						printf("\n%ld Triggers: %s\n", t, triggers.c_str());
+						printf("\n%ld %ld Triggers: %s\n", t, t-lastSend, triggers.c_str());
 						lastTriggers = triggers;
 					}
 					break;
@@ -217,12 +226,18 @@ int main(int argc, char* argv[])
 		if (t > timerSafeWrite && commandQueue.length() > 2)
 		{
 			timerSafeWrite = timerPeriodicCommands; // hold next sending till successful read or next new command
+			
+			lastSend = t;
 			res = sendPIC(handle, &commandQueue);
 			if (res < 0)
 			{
-				printf("Unable to write to the PIC. %s\n", commandQueue.c_str());
+				printf("\nUnable to write to the PIC.\n");
 				printf("Error: %ls\n", hid_error(handle));
-			}			
+				hid_close(handle);
+				hid_exit();
+				handle = 0;
+				continue;
+			}
 		}	
 	}
 
@@ -241,7 +256,7 @@ int main(int argc, char* argv[])
 int sendPIC(hid_device *handle, string *cmd)
 {
 	int len = cmd->length();
-	// the command shall be lat least 6 characters and in even number length
+	// the command shall be lat least 6 characters
 	if (len < 6)
 	{
 		cmd->assign("");
@@ -266,16 +281,16 @@ int sendPIC(hid_device *handle, string *cmd)
 
 	if (len < 3 || len > 20)
 	{
+		printf("\nInvalid command %s in queue.\n", cmd->c_str());
 		cmd->assign("");
 		return -1;
 	}
 	
-	//printf("\n Original command: %s %d %s", cmd->c_str(), len, cmd->substr(len + 1).c_str());
+	// Update the command queue
 	if (buf[1] < cmd->length())
 		cmd->assign(cmd->substr(len + len + 2));
 	else
 		cmd->assign("");
-	//printf("\n Processed command: %s", cmd->c_str());
 	
 	return hid_write(handle, buf, len + 1);
 };
