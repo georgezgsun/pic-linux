@@ -13,6 +13,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/time.h>
+//#include <time.h>
 #include <iostream>
 #include "hidapi.h"
 
@@ -52,7 +53,8 @@ int main(int argc, char* argv[])
 	string turnMIC2On = "B2063200010100";
 	string turnMIC2Off = "B2063200010100";
 	string setHeartbeatOn = "B204F10100";
-	string setHeartbeatOff = "B204F10200";	
+	string setHeartbeatOff = "B204F10200";
+	string getSystemIssueFlags = "B2032700";
 
 #ifdef WIN32
 	UNREFERENCED_PARAMETER(argc);
@@ -100,22 +102,27 @@ int main(int argc, char* argv[])
 	// Read requested state. hid_read() has been set to be
 	// non-blocking by the call to hid_set_nonblocking() above.
 	// This loop demonstrates the non-blocking nature of hid_read().
-	int ticksEverySecond = 4;
-	int intervalTime = CLOCKS_PER_SEC / ticksEverySecond;
-	clock_t timerSafeWrite = 0;  // timer used to guard safe writing of new commands to PIC. 0 will allow immidiate writting in main loop
-	clock_t timerPeriodicCommands = clock() + intervalTime;	// timer used to tracking periodic commands. Next commands are added later.
-	clock_t t;
-	clock_t lastSend=0;
+	//int ticksEverySecond = 4;
+	//int intervalTime = CLOCKS_PER_SEC / ticksEverySecond;
+	//clock_t timerSafeWrite = 0;  // timer used to guard safe writing of new commands to PIC. 0 will allow immidiate writting in main loop
+	//clock_t timerPeriodicCommands = clock() + intervalTime;	// timer used to tracking periodic commands. Next commands are added later.
+	//clock_t t, t0=0;
 
 	res = 0;
 	int count = 0;
+	struct timespec tim = {0, 990000L}; // sleep for almost 1ms
+	struct timeval tv;
+	long lastSend = 0;
+	long dt;
 	string triggers = "";
 	string lastTriggers = "";
 	memset(buf, 0, sizeof(buf));
 	printf("Start dialogue with the PIC.\n");
 	while (true)
 	{
-		t = clock();
+		// To sleep for 1ms. This may significantly reduce the CPU usage
+		clock_nanosleep(CLOCK_REALTIME, 0, &tim, NULL);
+		gettimeofday(&tv, NULL);
 		
 		if (!handle)
 		{
@@ -123,9 +130,7 @@ int main(int argc, char* argv[])
 			if (!handle)
 				continue;
 			
-			commandQueue = "B2032700";
-			timerPeriodicCommands = t + intervalTime;
-			timerSafeWrite = timerPeriodicCommands;
+			commandQueue = getSystemIssueFlags;
 			hid_set_nonblocking(handle, 1);
 		}
 
@@ -136,7 +141,7 @@ int main(int argc, char* argv[])
 			printf("\nUnable to read from the PIC.\n");
 			printf("Error: %ls\n", hid_error(handle));
 			hid_close(handle);
-			hid_exit();
+			//hid_exit();
 			handle = 0;
 			continue;
 		}
@@ -144,15 +149,17 @@ int main(int argc, char* argv[])
 		// Parse the reading from the PIC
 		if (res > 0)
 		{
-			timerSafeWrite = t + CLOCKS_PER_SEC / 1000; // 1ms secured timer
 			i = buf[1];
 			buf[i] = 0;
 			string ID = "Serial Number";
+			dt = tv.tv_usec - lastSend;
+			if (dt < 0)
+				dt += 1000000L;
 
 			switch (buf[2])
 			{
 				case 0x22 : // GPS reading
-					printf("\r%ld %ld GPS: ", t, t-lastSend);
+					printf("\r%ld.%06ld %ld GPS: ", tv.tv_sec, tv.tv_usec, dt);
 					for (i = 3; i < buf[1]; i++)
 						printf("%c", buf[i]);
 					break;
@@ -162,7 +169,7 @@ int main(int argc, char* argv[])
 						ID = "Firmware version";
 					if (i > 20)
 						ID = "Hardware version";
-					printf("\n%ld %ld %s: %s", t, t-lastSend, ID.c_str(), buf + 3);
+					printf("\n%ld.%06ld %ld %s: %s", tv.tv_sec, tv.tv_usec, dt, ID.c_str(), buf + 3);
 					break;
 					
 				case 0x24 :  // Trigger
@@ -180,7 +187,7 @@ int main(int argc, char* argv[])
 					
 					if (triggers != lastTriggers)
 					{
-						printf("\n%ld %ld Triggers: %s\n", t, t-lastSend, triggers.c_str());
+						printf("\n%ld.%06ld %ld Triggers: %s\n", tv.tv_sec, tv.tv_usec, dt, triggers.c_str());
 						lastTriggers = triggers;
 					}
 					break;
@@ -190,55 +197,58 @@ int main(int argc, char* argv[])
 					break;
 					
 				default :
+					printf("\n%ld.%06ld %ld : ", tv.tv_sec, tv.tv_usec, dt); 
 					for (unsigned short i = 0; i < buf[1] + 1; i++)
 						printf("%02hx ", buf[i]);
 					printf("\n");
 			}
 			
 			memset(buf, 0, sizeof(buf));
-			fflush(stdout);
+			fflush(stdout);	
+			continue;
 		}
 		
 		// Check if it is time to add a periodic command
-		if (t > timerPeriodicCommands)
-		{
-			timerSafeWrite = timerPeriodicCommands;  // always safe to send PIC a new command in new cycle
-			timerPeriodicCommands += intervalTime;
-			count++;
-			if (count >= ticksEverySecond)
-				count = 0;
+		count++;
+		if (count >= 1000)
+			count = 0;
 
-			commandQueue.append(readTrigger);
-			switch (count)
-			{
-				case 0 :  // turn LED off
-					commandQueue.append(turnLEDOff);
-					break;
-				case 1 :  // read GPS
-					commandQueue.append(readGPS);
-					break;
-				case 2 : // turn LED on
-					commandQueue.append(turnLEDOn);
-			}			
-		}
+		switch (count)
+		{
+			case 0 :  // read Triggers every 250ms
+			case 250 :
+			case 500 :
+			case 750 :
+				commandQueue.append(readTrigger);
+				break;
+			case 50 :  // turn LED off every second at 50ms
+				commandQueue.append(turnLEDOff);
+				break;
+			case 400 :  // read GPS every second at 400ms
+				commandQueue.append(readGPS);
+				break;
+			case 550 : // turn LED on every second at 550ms
+				commandQueue.append(turnLEDOn);
+		}			
 
 		// Check if it is safe to send a new command to PIC
-		if (t > timerSafeWrite && commandQueue.length() > 2)
+		if (commandQueue.length() > 3)
 		{
-			timerSafeWrite = timerPeriodicCommands; // hold next sending till successful read or next new command
-			
-			lastSend = t;
+			//timerSafeWrite = timerPeriodicCommands; // hold next sending till successful read or next new command
+			lastSend = tv.tv_usec; // sending moment in microseconds
 			res = sendPIC(handle, &commandQueue);
 			if (res < 0)
 			{
 				printf("\nUnable to write to the PIC.\n");
 				printf("Error: %ls\n", hid_error(handle));
 				hid_close(handle);
-				hid_exit();
+				//hid_exit();
 				handle = 0;
 				continue;
 			}
-		}	
+		}
+		else
+			commandQueue.assign("");
 	}
 
 	hid_close(handle);
