@@ -13,6 +13,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/time.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
 //#include <time.h>
 #include <iostream>
 #include "hidapi.h"
@@ -27,6 +29,17 @@
 using namespace std;
 
 int sendPIC(hid_device *handle, string *cmd); 
+
+string getDateTime(time_t tv_sec, time_t tv_usec)
+{
+	struct tm *nowtm;
+	char tmbuf[64], buf[64];
+
+	nowtm = localtime(&tv_sec);
+	strftime(tmbuf, sizeof tmbuf, "%Y-%m-%d %H:%M:%S", nowtm);
+	snprintf(buf, sizeof buf, "%s.%06ld", tmbuf, tv_usec);
+	return buf;
+}
 
 int main(int argc, char* argv[])
 {
@@ -95,6 +108,29 @@ int main(int argc, char* argv[])
 
 	// Set the hid_read() function to be non-blocking.
 	hid_set_nonblocking(handle, 1);
+	
+
+	key_t m_key = 12345;
+	int s_ID = 0;
+	int m_ID = msgget(m_key, 0666 | IPC_CREAT);
+	printf("Create a message queue of ID %d using %d as the key for receiving the main module key.\n", m_ID, m_key);
+	// structure that holds the whole packet of a message in message queue
+	struct MsgBuf
+	{
+		long rChn;  // Receiver type
+		long sChn; // Sender Type
+		long sec;    // timestamp sec
+		long usec;   // timestamp usec
+		size_t type; // type of this property, first bit 0 indicates string, 1 indicates interger. Any value greater than 32 is a command.
+		size_t len;   //length of message payload in mText
+		char mText[255];  // message payload
+	};
+	struct MsgBuf m_buf;
+	int offset;
+	char txt[20];
+	long Chn;
+	memset(m_buf.mText, 0, sizeof(m_buf.mText));  // fill 0 before reading, make sure no garbage left over
+	int m_HeaderLength = sizeof(m_buf.sChn) + sizeof(m_buf.sec) + sizeof(m_buf.usec) + sizeof(m_buf.type) + sizeof(m_buf.len);
 
 	// Read the serial number (cmd 0x25). The first byte is always (0xB2).
 	commandQueue = turnMIC1On + readSerialNumber + readHardwareVersion + readFirmwareVersion;
@@ -123,6 +159,15 @@ int main(int argc, char* argv[])
 		// To sleep for 1ms. This may significantly reduce the CPU usage
 		clock_nanosleep(CLOCK_REALTIME, 0, &tim, NULL);
 		gettimeofday(&tv, NULL);
+		
+		int l = msgrcv(m_ID, &m_buf, sizeof(m_buf), 0, IPC_NOWAIT);
+		l -= m_HeaderLength;
+		if (l >= 0)
+		{
+			m_key = m_buf.sChn;
+			s_ID = msgget(m_key, 0444 | IPC_CREAT);
+			printf("\nGet a new key %d, with which creates a message queue of ID %d.\n", m_key, s_ID);
+		}
 		
 		if (!handle)
 		{
@@ -159,9 +204,94 @@ int main(int argc, char* argv[])
 			switch (buf[2])
 			{
 				case 0x22 : // GPS reading
-					printf("\r%ld.%06ld %ld GPS: ", tv.tv_sec, tv.tv_usec, dt);
-					for (i = 3; i < buf[1]; i++)
-						printf("%c", buf[i]);
+					//printf("\r%ld.%06ld %ld GPS: ", tv.tv_sec, tv.tv_usec, dt);
+					printf("\r%s %ld GPS: %s", getDateTime(tv.tv_sec, tv.tv_usec).c_str(), dt, buf + 3);
+					//for (i = 3; i < buf[1]; i++)
+					//	printf("%c", buf[i]);
+					//printf("(%d)", s_ID);
+					
+					// reply the latest GPS data
+					if (s_ID <= 0)
+						break;
+					
+					Chn = 3; // GPS channel
+					offset = 0;
+					// readoff all the messages at that channel first in case it does not work any more
+					while (msgrcv(s_ID, &m_buf, sizeof(m_buf), Chn, IPC_NOWAIT) > 0)
+					{					
+						offset++;
+					};
+					if (offset)
+						printf("There are %d staled messages in the message queue %d.\n", offset, s_ID);
+					
+					// position
+					strcpy(m_buf.mText, "position");
+					offset = strlen("position") + 1;
+					m_buf.mText[offset++] = 0;	// specify it is a string
+					for (i = 3; i < 3 + 9; i++)	// xxxx.xxxx
+						m_buf.mText[offset++] = buf[i];
+					m_buf.mText[offset++] = buf[13]; // N
+					m_buf.mText[offset++] = buf[14]; // ,
+					for (i = 15; i < 15 +10; i++)	// xxxxx.xxxx
+						m_buf.mText[offset++] = buf[i];
+					m_buf.mText[offset++] = buf[26]; // W
+					m_buf.mText[offset++] = 0;	// specify it is end of a string
+					
+					// altitute
+					strcpy(m_buf.mText + offset, "altitute");
+					offset += strlen("altitute") + 1;
+					m_buf.mText[offset++] = sizeof(int);	// specify it is an integer
+					txt[0] = buf[28];
+					txt[1] = buf[29];
+					txt[2] = buf[30];
+					txt[3] = 0;
+					i = atoi(txt);
+					memcpy(m_buf.mText + offset, &i, sizeof(int));
+					offset += sizeof(int);
+					
+					// seconds
+					strcpy(m_buf.mText + offset, "epoch");
+					offset += strlen("epoch") + 1;
+					m_buf.mText[offset++] = sizeof(int);	// specify it is an integer
+					txt[0] = buf[48];
+					txt[1] = buf[49];
+					txt[2] = buf[50];
+					txt[3] = buf[51];
+					txt[4] = buf[52];
+					txt[5] = buf[53];
+					txt[6] = 0;
+					i = atoi(txt);
+					memcpy(m_buf.mText + offset, &i, sizeof(int));
+					offset += sizeof(int);
+					
+					// date
+					strcpy(m_buf.mText + offset, "date");
+					offset += strlen("date") + 1;
+					m_buf.mText[offset++] = 0;	// specify it is a string
+					m_buf.mText[offset++] = '2';
+					m_buf.mText[offset++] = '0';
+					m_buf.mText[offset++] = buf[59];
+					m_buf.mText[offset++] = buf[60];
+					m_buf.mText[offset++] = '-';
+					m_buf.mText[offset++] = buf[57];
+					m_buf.mText[offset++] = buf[58];
+					m_buf.mText[offset++] = '-';
+					m_buf.mText[offset++] = buf[55];
+					m_buf.mText[offset++] = buf[56];
+					m_buf.mText[offset++] = 0;
+					
+					m_buf.len = offset;	
+					m_buf.type = 14; // CMD_PUBLISHDATA
+					m_buf.sec = tv.tv_sec;
+					m_buf.usec = tv.tv_usec;
+					m_buf.sChn = Chn;
+
+					if (msgsnd(s_ID, &m_buf, m_buf.len + m_HeaderLength, IPC_NOWAIT))
+						printf("\n(Debug) Critical error. Unable to send the message to queue %d. Message is of length %d, and header length %d.", 
+							s_ID, offset, m_HeaderLength);
+					else
+						printf(" Send to %d %s ", offset, m_buf.mText);
+
 					break;
 					
 				case 0x25 : // Serial number
@@ -185,11 +315,36 @@ int main(int argc, char* argv[])
 							triggers.append(" ");
 					}
 					
-					if (triggers != lastTriggers)
-					{
-						printf("\n%ld.%06ld %ld Triggers: %s\n", tv.tv_sec, tv.tv_usec, dt, triggers.c_str());
-						lastTriggers = triggers;
-					}
+					if (triggers == lastTriggers)
+						break;
+
+					printf("\n%ld.%06ld %ld Triggers: %s", tv.tv_sec, tv.tv_usec, dt, triggers.c_str());
+					lastTriggers = triggers;
+					
+					if (s_ID <= 0)
+						break;
+					
+					offset = 0;
+					// Trigger
+					strcpy(m_buf.mText, "Trigger");
+					offset += strlen("Trigger") + 1;
+					m_buf.mText[offset++] = 0;	// specify it is a string
+					strcpy(m_buf.mText + offset, triggers.c_str());
+					offset += triggers.length() +1;
+
+					Chn = 5; // trigger channel
+					m_buf.len = offset;	
+					m_buf.type = 14; // CMD_PUBLISHDATA
+					m_buf.sec = tv.tv_sec;
+					m_buf.usec = tv.tv_usec;
+					m_buf.sChn = Chn;
+
+					if (msgsnd(s_ID, &m_buf, m_buf.len + m_HeaderLength, IPC_NOWAIT))
+						printf("\n(Debug) Critical error. Unable to send the message to queue %d. Message is of length %d, and header length %d.\n", 
+							s_ID, offset, m_HeaderLength);
+					else
+						printf(" Send to %d", s_ID);
+
 					break;
 					
 				case 0x41 : // LED reading

@@ -1,12 +1,12 @@
 ###########################################
-# Simple Makefile for HIDAPI test program
+# Simple Makefile for PIC test program
 #
-# Alan Ott
-# Signal 11 Software
-# 2010-06-01
+# George Sun
+# A-Concept Inc.
+# 2019-03-15
 ###########################################
 
-all: hidtest-hidraw libs
+all: pictest libs
 
 libs: libhidapi-hidraw.so
 
@@ -28,7 +28,7 @@ INCLUDES ?= -I../hidapi `pkg-config libusb-1.0 --cflags`
 
 
 # Console Test Program
-hidtest-hidraw: $(COBJS) $(CPPOBJS)
+pictest: $(COBJS) $(CPPOBJS)
 	$(CXX) $(LDFLAGS) $^ $(LIBS_UDEV) -o $@
 
 # Shared Libs
@@ -44,6 +44,6 @@ $(CPPOBJS): %.o: %.cpp
 
 
 clean:
-	rm -f $(OBJS) hidtest-hidraw libhidapi-hidraw.so pictest.o
+	rm -f $(OBJS) pictest libhidapi-hidraw.so pictest.o
 
 .PHONY: clean libs
