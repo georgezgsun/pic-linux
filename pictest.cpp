@@ -15,6 +15,8 @@
 #include <sys/time.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
+#include <sys/types.h>
+#include <dirent.h>
 //#include <time.h>
 #include <iostream>
 #include "hidapi.h"
@@ -40,6 +42,55 @@ string getDateTime(time_t tv_sec, time_t tv_usec)
 	snprintf(buf, sizeof buf, "%s.%06ld", tmbuf, tv_usec);
 	return buf;
 }
+
+pid_t proc_find(const char* name) 
+{
+    DIR* dir;
+    struct dirent* ent;
+    char buf[512];
+
+    long  pid;
+    char pname[100] = {0,};
+    char state;
+    FILE *fp=NULL; 
+
+    if (!(dir = opendir("/proc"))) 
+	{
+        perror("can't open /proc");
+        return -1;
+    }
+
+    while((ent = readdir(dir))) 
+	{
+        long lpid = atol(ent->d_name);
+        if(lpid < 0)
+            continue;
+        snprintf(buf, sizeof(buf), "/proc/%ld/stat", lpid);
+        fp = fopen(buf, "r");
+
+        if (fp) 
+		{
+            if ( (fscanf(fp, "%ld (%[^)]) %c", &pid, pname, &state)) != 3 )
+			{
+                printf("fscanf failed \n");
+                fclose(fp);
+                closedir(dir);
+                return -1; 
+            }
+            if (!strcmp(pname, name)) 
+			{
+                fclose(fp);
+                closedir(dir);
+                return (pid_t)lpid;
+            }
+            fclose(fp);
+        }
+    }
+
+	closedir(dir);
+	return -1;
+}
+
 
 int main(int argc, char* argv[])
 {
@@ -246,9 +297,25 @@ int main(int argc, char* argv[])
 					m_buf.mText[offset++] = buf[28];
 					m_buf.mText[offset++] = buf[29];
 					m_buf.mText[offset++] = buf[30];
+					m_buf.mText[offset++] = buf[31];
+					m_buf.mText[offset++] = buf[32];
 					m_buf.mText[offset++] = 0;
 					
-					printf("%s=%s, ", m_buf.mText + l, m_buf.mText + i);
+					printf("%s=%sm, ", m_buf.mText + l, m_buf.mText + i);
+					l = offset;
+					
+					//speed
+					strcpy(m_buf.mText + offset, "speed");
+					offset += strlen("speed") + 1;
+					m_buf.mText[offset++] = 0;	// specify it is a string
+					i = offset;
+					m_buf.mText[offset++] = buf[42];
+					m_buf.mText[offset++] = buf[43];
+					m_buf.mText[offset++] = buf[44];
+					m_buf.mText[offset++] = buf[45];
+					m_buf.mText[offset++] = 0;					
+
+					printf("%s=%skm/h, ", m_buf.mText + l, m_buf.mText + i);
 					l = offset;
 					
 					// time
@@ -289,7 +356,7 @@ int main(int argc, char* argv[])
 					printf("%s=%s, ", m_buf.mText + l, m_buf.mText + i);
 					
 					m_buf.len = offset;	
-					m_buf.type = 14; // CMD_PUBLISHDATA
+					m_buf.type = 11; // CMD_SERVICEDATA
 					m_buf.sec = tv.tv_sec;
 					m_buf.usec = tv.tv_usec;
 					m_buf.sChn = Chn;
@@ -301,12 +368,28 @@ int main(int argc, char* argv[])
 
 					break;
 					
-				case 0x25 : // Serial number
-					if (buf[3] > 47 && buf[3] < 58)
-						ID = "Firmware version";
-					if (i > 20)
-						ID = "Hardware version";
-					printf("\n%s %ld %s %s", getDateTime(tv.tv_sec, tv.tv_usec).c_str(), dt, ID.c_str(), buf + 3);
+				case 0x23:
+					// Radar data
+					strcpy(m_buf.mText, "radar");
+					offset = strlen("radar") + 1;
+					m_buf.mText[offset++] = 0;	// specify it is a string
+					l = offset;
+					for (i = 3; i < buf[1] - 1; i++)
+						m_buf.mText[offset++] = buf[i];
+					m_buf.mText[offset++] = 0;	// end of a string					
+
+					printf("%s=%s, ", m_buf.mText, m_buf.mText + l);
+					
+					m_buf.len = offset;	
+					m_buf.type = 11; // CMD_SERVICEDATA
+					m_buf.sec = tv.tv_sec;
+					m_buf.usec = tv.tv_usec;
+					m_buf.sChn = Chn;
+					m_buf.rChn = Chn;
+					
+					if (msgsnd(s_ID, &m_buf, m_buf.len + m_HeaderLength, IPC_NOWAIT))
+						printf("\n(Debug) Critical error. Unable to send the message to queue %d. Message is of length %d, and header length %d.", 
+							s_ID, offset, m_HeaderLength);
 					break;
 					
 				case 0x24 :  // Trigger
@@ -324,7 +407,7 @@ int main(int argc, char* argv[])
 					
 					if (triggers != lastTriggers)
 					{
-						printf("\n%s %ld Triggers: %s\n", getDateTime(tv.tv_sec, tv.tv_usec).c_str(), dt, triggers.c_str());
+						printf("\n%s %ld Trigger=%s\n", getDateTime(tv.tv_sec, tv.tv_usec).c_str(), dt, triggers.c_str());
 						lastTriggers = triggers;
 					}
 					
@@ -345,9 +428,17 @@ int main(int argc, char* argv[])
 					m_buf.sChn = Chn;
 					m_buf.rChn = Chn;
 					m_buf.len = offset;	
-					m_buf.type = 14; // CMD_PUBLISHDATA
+					m_buf.type = 11; // CMD_SERVICEDATA
 					if (msgsnd(s_ID, &m_buf, m_buf.len + m_HeaderLength, IPC_NOWAIT))
 						printf("\n(Debug) Critical error. Unable to publish Trigger data. length %ld, and header length %d.\n", m_buf.len, m_HeaderLength);
+					break;
+					
+				case 0x25 : // Serial number
+					if (buf[3] > 47 && buf[3] < 58)
+						ID = "Firmware version";
+					if (i > 20)
+						ID = "Hardware version";
+					printf("\n%s %ld %s %s", getDateTime(tv.tv_sec, tv.tv_usec).c_str(), dt, ID.c_str(), buf + 3);
 					break;
 					
 				case 0x41 : // LED reading
