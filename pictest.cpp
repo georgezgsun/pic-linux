@@ -1,32 +1,101 @@
-#include <cstdio>
 /*******************************************************
- PIC reader based on HIDAPI
+ PIC reader for Roswell based on HIDAPI
 
  George Sun
  A-Concept Inc. 
 
- 03/22/2019
+ 06/05/2019
 ********************************************************/
 
+#include <cstdio>
 #include <stdio.h>
 #include <wchar.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sys/time.h>
-//#include <time.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include <sys/types.h>
+#include <dirent.h>
 #include <iostream>
-#include "hidapi.h"
-
-// Headers needed for sleeping.
-#ifdef _WIN32
-#include <windows.h>
-#else
 #include <unistd.h>
-#endif
+
+#include "hidapi.h"
 
 using namespace std;
 
 int sendPIC(hid_device *handle, string *cmd); 
+
+string getDateTime(time_t tv_sec, time_t tv_usec)
+{
+	struct tm *nowtm;
+	char tmbuf[64], buf[64];
+
+	nowtm = localtime(&tv_sec);
+	strftime(tmbuf, sizeof tmbuf, "%Y-%m-%d %H:%M:%S", nowtm);
+	snprintf(buf, sizeof buf, "%s.%06ld", tmbuf, tv_usec);
+	return buf;
+}
+
+pid_t proc_find(const char* name) 
+{
+    DIR* dir;
+    struct dirent* ent;
+    char buf[512];
+
+    long  pid;
+    char pname[100] = {0,};
+    char state;
+    FILE *fp=NULL; 
+
+    if (!(dir = opendir("/proc"))) 
+	{
+        perror("can't open /proc");
+        return -1;
+    }
+
+    while((ent = readdir(dir))) 
+	{
+        long lpid = atol(ent->d_name);
+        if(lpid < 0)
+            continue;
+        snprintf(buf, sizeof(buf), "/proc/%ld/stat", lpid);
+        fp = fopen(buf, "r");
+
+        if (fp) 
+		{
+            if ( (fscanf(fp, "%ld (%[^)]) %c", &pid, pname, &state)) != 3 )
+			{
+                printf("fscanf failed \n");
+                fclose(fp);
+                closedir(dir);
+                return -1; 
+            }
+            if (!strcmp(pname, name)) 
+			{
+                fclose(fp);
+                closedir(dir);
+                return (pid_t)lpid;
+            }
+            fclose(fp);
+        }
+    }
+
+	closedir(dir);
+	return -1;
+}
+
+// structure that holds the whole packet of a message in message queue
+struct MsgBuf
+{
+	long rChn;  // Receiver type
+	long sChn; // Sender Type
+	long sec;    // timestamp sec
+	long usec;   // timestamp usec
+	size_t type; // type of this property, first bit 0 indicates string, 1 indicates interger. Any value greater than 32 is a command.
+	size_t len;   //length of message payload in mText
+	char mText[255];  // message payload
+};
 
 int main(int argc, char* argv[])
 {
@@ -38,7 +107,6 @@ int main(int argc, char* argv[])
 	unsigned short PID = 0xf2bf;
 	unsigned char buf[255];
 	string commandQueue = "";
-	int i;
 	
 	string readSerialNumber = "B20525000100";
 	string readGPS = "B2032200";
@@ -96,34 +164,57 @@ int main(int argc, char* argv[])
 	// Set the hid_read() function to be non-blocking.
 	hid_set_nonblocking(handle, 1);
 
-	// Read the serial number (cmd 0x25). The first byte is always (0xB2).
-	commandQueue = turnMIC1On + readSerialNumber + readHardwareVersion + readFirmwareVersion;
-
-	// Read requested state. hid_read() has been set to be
-	// non-blocking by the call to hid_set_nonblocking() above.
-	// This loop demonstrates the non-blocking nature of hid_read().
-	//int ticksEverySecond = 4;
-	//int intervalTime = CLOCKS_PER_SEC / ticksEverySecond;
-	//clock_t timerSafeWrite = 0;  // timer used to guard safe writing of new commands to PIC. 0 will allow immidiate writting in main loop
-	//clock_t timerPeriodicCommands = clock() + intervalTime;	// timer used to tracking periodic commands. Next commands are added later.
-	//clock_t t, t0=0;
-
-	res = 0;
-	int count = 0;
-	struct timespec tim = {0, 990000L}; // sleep for almost 1ms
-	struct timeval tv;
-	long lastSend = 0;
-	long dt;
-	string triggers = "";
-	string lastTriggers = "";
-	memset(buf, 0, sizeof(buf));
+	key_t m_key = VID;  // using the VID as the key for message queue
+	int s_ID = 0;
+	int m_ID = msgget(m_key, 0666 | IPC_CREAT);
 	printf("Start dialogue with the PIC.\n");
+	printf("I can be reached using message queue of ID %d and of key %d.\n", m_ID, m_key);
+	
+	struct MsgBuf m_buf;
+	long sChn;
+	int m_HeaderLength = sizeof(m_buf.sChn) + sizeof(m_buf.sec) + sizeof(m_buf.usec) + sizeof(m_buf.type) + sizeof(m_buf.len);
+	string cmd;
+
+	struct timespec tim = {0, 999999L}; // sleep for almost 1ms
+	struct timeval tv;
+	time_t lastSend = 0;
+
+	bool idle = false;
+	memset(m_buf.mText, 0, sizeof(m_buf.mText));  // fill 0 before reading, make sure no garbage left over
+	memset(buf, 0, sizeof(buf));
+	commandQueue = readSerialNumber + readFirmwareVersion + readHardwareVersion + setHeartbeatOff;
 	while (true)
 	{
 		// To sleep for 1ms. This may significantly reduce the CPU usage
 		clock_nanosleep(CLOCK_REALTIME, 0, &tim, NULL);
 		gettimeofday(&tv, NULL);
 		
+		// read from message queue for any channel
+		int l = msgrcv(m_ID, &m_buf, sizeof(m_buf), 0, IPC_NOWAIT);
+		l -= m_HeaderLength;
+		if (l >= 0)
+		{
+			// using rChn as the key
+			if (m_key != m_buf.rChn)
+			{
+				m_key = m_buf.rChn;
+				s_ID = msgget(m_key, 0444 | IPC_CREAT);
+				printf("\nGet a new key %d, with which creates a message queue of ID %d.\n", m_key, s_ID);
+			}
+			
+			// get the command from the message queue
+			if (m_buf.mText[0] == 0xB2)
+			{
+				cmd.assign(m_buf.mText);
+				commandQueue.append(cmd);
+				idle = false;
+			}
+			
+			// update the receiving channel
+			sChn = m_buf.sChn;
+		}
+		
+		// This handles the lost of PIC
 		if (!handle)
 		{
 			handle = hid_open(VID, PID, NULL);
@@ -149,116 +240,65 @@ int main(int argc, char* argv[])
 		// Parse the reading from the PIC
 		if (res > 0)
 		{
-			i = buf[1];
-			buf[i] = 0;
-			string ID = "Serial Number";
-			dt = tv.tv_usec - lastSend;
-			if (dt < 0)
-				dt += 1000000L;
-
-			switch (buf[2])
-			{
-				case 0x22 : // GPS reading
-					printf("\r%ld.%06ld %ld GPS: ", tv.tv_sec, tv.tv_usec, dt);
-					for (i = 3; i < buf[1]; i++)
-						printf("%c", buf[i]);
-					break;
-					
-				case 0x25 : // Serial number
-					if (buf[3] > 47 && buf[3] < 58)
-						ID = "Firmware version";
-					if (i > 20)
-						ID = "Hardware version";
-					printf("\n%ld.%06ld %ld %s: %s", tv.tv_sec, tv.tv_usec, dt, ID.c_str(), buf + 3);
-					break;
-					
-				case 0x24 :  // Trigger
-					triggers = "";
-					for (i = 3; i < buf[1] - 1; i++)
-					{
-						if (buf[i])
-							triggers.append("^");
-						else
-							triggers.append("_");
-						
-						if ((i-2) % 4 == 0)
-							triggers.append(" ");
-					}
-					
-					if (triggers != lastTriggers)
-					{
-						printf("\n%ld.%06ld %ld Triggers: %s\n", tv.tv_sec, tv.tv_usec, dt, triggers.c_str());
-						lastTriggers = triggers;
-					}
-					break;
-					
-				case 0x41 : // LED reading
-				case 0x32 : // MIC on/off
-					break;
-					
-				default :
-					printf("\n%ld.%06ld %ld : ", tv.tv_sec, tv.tv_usec, dt); 
-					for (unsigned short i = 0; i < buf[1] + 1; i++)
+			// print the reply from the pic
+			printf("\r%s %02hx: ", getDateTime(tv.tv_sec, tv.tv_usec).c_str(), buf[2]); // print the command byte
+			for (int i = 3; i < 65; i++)
+				if (i < buf[1] + 1)
+					if (buf[i] < 32 || buf[i] > 128)
 						printf("%02hx ", buf[i]);
-					printf("\n");
-			}
+					else printf("%c", buf[i]);
+				else
+					printf(" ");  // clear previous prints
+				
+			if (buf[2] == 0x25)
+				printf("\n"); // keep the information
 			
-			memset(buf, 0, sizeof(buf));
-			fflush(stdout);	
-			continue;
+			m_buf.sec = tv.tv_sec;
+			m_buf.usec = tv.tv_usec;
+			m_buf.type = 11; // CMD_SERVICEDATA
+			m_buf.rChn = sChn; // reply back to the sender's channel
+			m_buf.sChn = PID;
+			m_buf.len = buf[1] + 2; // the length of the pic report plus 0xB2 and len
+			memcpy(m_buf.mText, buf, m_buf.len);
+			m_buf.mText[m_buf.len] = 0; // put a /0 at the end. This may help to convert it into a string.
+					
+			if (s_ID && msgsnd(s_ID, &m_buf, m_buf.len + m_HeaderLength, IPC_NOWAIT))
+			{
+				printf("\n%s (Critical error) Unable to send the message to queue %d. Message is %s.\n", 
+					getDateTime(tv.tv_sec, tv.tv_usec).c_str(), s_ID, m_buf.mText);
+				s_ID = 0;
+			}
 		}
-		
-		// Check if it is time to add a periodic command
-		count++;
-		if (count >= 1000)
-			count = 0;
 
-		switch (count)
+		// Handle heartbeat after a long idle period
+		if (tv.tv_sec - lastSend > 30)
 		{
-			case 0 :  // read Triggers every 250ms
-			case 250 :
-			case 500 :
-			case 750 :
-				commandQueue.append(readTrigger);
-				break;
-			case 50 :  // turn LED off every second at 50ms
-				commandQueue.append(turnLEDOff);
-				break;
-			case 400 :  // read GPS every second at 400ms
-				commandQueue.append(readGPS);
-				break;
-			case 550 : // turn LED on every second at 550ms
-				commandQueue.append(turnLEDOn);
-		}			
+			printf("\n%s send command HeartbeatOff\n", getDateTime(tv.tv_sec, tv.tv_usec).c_str()); // print the command byte
+			commandQueue.append(setHeartbeatOff);
+			idle = true;
+		}
 
 		// Check if it is safe to send a new command to PIC
 		if (commandQueue.length() > 3)
 		{
-			//timerSafeWrite = timerPeriodicCommands; // hold next sending till successful read or next new command
-			lastSend = tv.tv_usec; // sending moment in microseconds
+			lastSend = tv.tv_sec; // sending moment in microseconds
 			res = sendPIC(handle, &commandQueue);
 			if (res < 0)
 			{
-				printf("\nUnable to write to the PIC.\n");
-				printf("Error: %ls\n", hid_error(handle));
+				printf("\nUnable to write to the PIC.\nError: %ls\n", hid_error(handle));
 				hid_close(handle);
-				//hid_exit();
 				handle = 0;
-				continue;
 			}
 		}
 		else
 			commandQueue.assign("");
 	}
 
+	// Close the HID handle
 	hid_close(handle);
 
-	/* Free static HIDAPI objects. */
+	// Free static HIDAPI objects.
 	hid_exit();
-
-#ifdef WIN32
-	system("pause");
-#endif
 
 	return 0;
 }
