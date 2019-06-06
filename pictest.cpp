@@ -112,7 +112,7 @@ int main(int argc, char* argv[])
 	string readGPS = "B2032200";
 	string readRadar = "B2032300";
 	string readTrigger = "B2032400";
-	string readFirmwareVersion = "B204250700";
+	string readFirmwareVersion = "B20525070100";
 	string readHardwareVersion = "B20525080100";
 	string turnLEDOn = "B20541000100";
 	string turnLEDOff = "B20541000000";
@@ -121,7 +121,7 @@ int main(int argc, char* argv[])
 	string turnMIC2On = "B2063200010100";
 	string turnMIC2Off = "B2063200010100";
 	string setHeartbeatOn = "B204F10100";
-	string setHeartbeatOff = "B204F10200";
+	string setHeartbeatOff = "B204F10000";
 	string getSystemIssueFlags = "B2032700";
 
 #ifdef WIN32
@@ -168,7 +168,7 @@ int main(int argc, char* argv[])
 	int s_ID = 0;
 	int m_ID = msgget(m_key, 0666 | IPC_CREAT);
 	printf("Start dialogue with the PIC.\n");
-	printf("I can be reached using message queue of ID %d and of key %d.\n", m_ID, m_key);
+	printf("I can be reached at message queue of ID %d or of key %d.\n", m_ID, m_key);
 	
 	struct MsgBuf m_buf;
 	long sChn;
@@ -177,9 +177,13 @@ int main(int argc, char* argv[])
 
 	struct timespec tim = {0, 999999L}; // sleep for almost 1ms
 	struct timeval tv;
-	time_t lastSend = 0;
+	gettimeofday(&tv, NULL);
+	time_t LastSendSec = tv.tv_sec;
+	time_t LastSendUSec = tv.tv_usec;
+	time_t TimeElapsed;
 
 	bool idle = false;
+	bool WriteLock = false;
 	memset(m_buf.mText, 0, sizeof(m_buf.mText));  // fill 0 before reading, make sure no garbage left over
 	memset(buf, 0, sizeof(buf));
 	commandQueue = readSerialNumber + readFirmwareVersion + readHardwareVersion + setHeartbeatOff;
@@ -188,6 +192,7 @@ int main(int argc, char* argv[])
 		// To sleep for 1ms. This may significantly reduce the CPU usage
 		clock_nanosleep(CLOCK_REALTIME, 0, &tim, NULL);
 		gettimeofday(&tv, NULL);
+		TimeElapsed = (tv.tv_sec - LastSendSec) * 1000000 + tv.tv_usec - LastSendUSec; // Time elapsed in microseconds since last command send 
 		
 		// read from message queue for any channel
 		int l = msgrcv(m_ID, &m_buf, sizeof(m_buf), 0, IPC_NOWAIT);
@@ -203,15 +208,15 @@ int main(int argc, char* argv[])
 			}
 			
 			// get the command from the message queue
-			if (m_buf.mText[0] == 0xB2)
+			if (m_buf.mText[0] == 'B')
 			{
 				cmd.assign(m_buf.mText);
 				commandQueue.append(cmd);
-				idle = false;
 			}
 			
 			// update the receiving channel
 			sChn = m_buf.sChn;
+			idle = false;
 		}
 		
 		// This handles the lost of PIC
@@ -241,7 +246,7 @@ int main(int argc, char* argv[])
 		if (res > 0)
 		{
 			// print the reply from the pic
-			printf("\r%s %02hx: ", getDateTime(tv.tv_sec, tv.tv_usec).c_str(), buf[2]); // print the command byte
+			printf("\r%s (%ldus) %02hx: ", getDateTime(LastSendSec, LastSendUSec).c_str(), TimeElapsed, buf[2]); // print the command byte
 			for (int i = 3; i < 65; i++)
 				if (i < buf[1] + 1)
 					if (buf[i] < 32 || buf[i] > 128)
@@ -268,20 +273,32 @@ int main(int argc, char* argv[])
 					getDateTime(tv.tv_sec, tv.tv_usec).c_str(), s_ID, m_buf.mText);
 				s_ID = 0;
 			}
+			
+			WriteLock = false;
 		}
 
-		// Handle heartbeat after a long idle period
-		if (tv.tv_sec - lastSend > 30)
+		// Handle heartbeat after a long idle period > 30s
+		if (TimeElapsed > 30000000L)
 		{
+			if (idle)
+				continue;
+
 			printf("\n%s send command HeartbeatOff\n", getDateTime(tv.tv_sec, tv.tv_usec).c_str()); // print the command byte
 			commandQueue.append(setHeartbeatOff);
 			idle = true;
 		}
+		
+		if (TimeElapsed > 100000L) // timeout 100ms
+			WriteLock = false;
 
 		// Check if it is safe to send a new command to PIC
 		if (commandQueue.length() > 3)
 		{
-			lastSend = tv.tv_sec; // sending moment in microseconds
+			if (WriteLock)
+				continue;
+			
+			LastSendSec = tv.tv_sec; // sending moment in seconds
+			LastSendUSec = tv.tv_usec; // sending moment in microseconds
 			res = sendPIC(handle, &commandQueue);
 			if (res < 0)
 			{
@@ -291,7 +308,9 @@ int main(int argc, char* argv[])
 			}
 		}
 		else
-			commandQueue.assign("");
+			commandQueue.clear();
+
+		WriteLock = true;
 	}
 
 	// Close the HID handle
@@ -340,7 +359,7 @@ int sendPIC(hid_device *handle, string *cmd)
 	if (buf[1] < cmd->length())
 		cmd->assign(cmd->substr(len + len + 2));
 	else
-		cmd->assign("");
+		cmd->clear();
 	
 	return hid_write(handle, buf, len + 1);
 };
