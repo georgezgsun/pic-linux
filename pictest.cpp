@@ -199,12 +199,14 @@ int main(int argc, char* argv[])
 		l -= m_HeaderLength;
 		if (l >= 0)
 		{
-			// using rChn as the key
-			if (m_key != m_buf.rChn)
+			// using rChn as the message queue ID
+			if (s_ID != m_buf.rChn)
 			{
-				m_key = m_buf.rChn;
-				s_ID = msgget(m_key, 0444 | IPC_CREAT);
-				printf("\nGet a new key %d, with which creates a message queue of ID %d.\n", m_key, s_ID);
+				//m_key = m_buf.rChn;
+				//s_ID = msgget(m_key, 0444 | IPC_CREAT);
+				//printf("\nGet a new key %d, with which creates a message queue of ID %d.\n", m_key, s_ID);
+				s_ID = m_buf.rChn;
+				printf("\nGet a new message queue ID %d.\n", s_ID);
 			}
 			
 			// get the command from the message queue
@@ -246,14 +248,19 @@ int main(int argc, char* argv[])
 		if (res > 0)
 		{
 			// print the reply from the pic
-			printf("\r%s (%ldus) %02hx: ", getDateTime(LastSendSec, LastSendUSec).c_str(), TimeElapsed, buf[2]); // print the command byte
-			for (int i = 3; i < 65; i++)
-				if (i < buf[1] + 1)
-					if (buf[i] < 32 || buf[i] > 128)
-						printf("%02hx ", buf[i]);
-					else printf("%c", buf[i]);
+			printf("\r%s (%ldus) %ld %02hx: ", getDateTime(LastSendSec, LastSendUSec).c_str(), TimeElapsed, sChn, buf[2]); // print the command byte
+			//for (int i = 3; i < 65; i++)
+			//	if (i < buf[1] + 1)
+			//		if (buf[i] < 32 || buf[i] > 128)
+			//			printf("<%02hx>", buf[i]);
+			//		else printf("%c", buf[i]);
+			//	else
+			//		printf(" ");  // clear previous prints
+			for (int i = 3; i < buf[1] + 1; i++)
+				if (buf[i] < 32 || buf[i] > 128)
+					printf("<%02hx>", buf[i]);
 				else
-					printf(" ");  // clear previous prints
+					printf("%c", buf[i]);
 				
 			if (buf[2] == 0x25)
 				printf("\n"); // keep the information
