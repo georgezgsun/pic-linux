@@ -108,10 +108,10 @@ int main(int argc, char* argv[])
 	unsigned char buf[255];
 	string commandQueue = "";
 	
-	string readSerialNumber = "B20525000100";
 	string readGPS = "B2032200";
 	string readRadar = "B2032300";
 	string readTrigger = "B2032400";
+	string readSerialNumber = "B20525000100";
 	string readFirmwareVersion = "B20525070100";
 	string readHardwareVersion = "B20525080100";
 	string turnLEDOn = "B20541000100";
@@ -124,11 +124,13 @@ int main(int argc, char* argv[])
 	string setHeartbeatOff = "B204F10000";
 	string getSystemIssueFlags = "B2032700";
 
-#ifdef WIN32
-	UNREFERENCED_PARAMETER(argc);
-	UNREFERENCED_PARAMETER(argv);
-#endif
-
+	bool ConsolePrint = argc > 1;
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	string currentDateTime = getDateTime(tv.tv_sec, tv.tv_usec);
+	FILE * fp = fopen("/tmp/pic.log", "a");
+	fprintf(fp, "\n%s : Start picRoswell with command %s.\n", currentDateTime.c_str(), argv[0]);
+	
 	if (hid_init())
 		return -1;
 
@@ -136,7 +138,9 @@ int main(int argc, char* argv[])
 	handle = hid_open(VID, PID, NULL);
 	if (!handle) 
 	{
-		printf("unable to open device\n");
+		printf("\nUnable to open device. Please start again as: sudo %s.\n", argv[0]);
+		fprintf(fp, "\nUnable to open device. Please start again as: sudo %s.\n", argv[0]);
+		fflush(fp);
 		return 1;
 	}
 
@@ -146,6 +150,7 @@ int main(int argc, char* argv[])
 	if (res < 0)
 		printf("Unable to read manufacturer string\n");
 	printf("\nManufacturer String: %ls\n", wstr);
+	fprintf(fp, "Manufacturer String: %ls\n", wstr);
 
 	// Read the Product String
 	wstr[0] = 0x0000;
@@ -153,6 +158,7 @@ int main(int argc, char* argv[])
 	if (res < 0)
 		printf("Unable to read product string\n");
 	printf("Product String: %ls\n", wstr);
+	fprintf(fp, "Product String: %ls\n", wstr);
 
 	// Read the Serial Number String
 	wstr[0] = 0x0000;
@@ -160,15 +166,20 @@ int main(int argc, char* argv[])
 	if (res < 0)
 		printf("Unable to read serial number string\n");
 	printf("Serial Number String: (%d) %ls\n\n", wstr[0], wstr);
+	fprintf(fp, "Serial Number String: (%d) %ls\n\n", wstr[0], wstr);
 
 	// Set the hid_read() function to be non-blocking.
 	hid_set_nonblocking(handle, 1);
 
+	// Setup the communication message queue
 	key_t m_key = VID;  // using the VID as the key for message queue
 	int s_ID = 0;
 	int m_ID = msgget(m_key, 0666 | IPC_CREAT);
 	printf("Start dialogue with the PIC.\n");
+	printf("The log is saved in /tmp/pic.log.\n");
 	printf("I can be reached at message queue of ID %d or of key %d.\n", m_ID, m_key);
+	fprintf(fp, "Using message queue of ID %d or of key %d for communication.\n", m_ID, m_key);
+	fflush(fp);
 	
 	struct MsgBuf m_buf;
 	long sChn;
@@ -176,8 +187,6 @@ int main(int argc, char* argv[])
 	string cmd;
 
 	struct timespec tim = {0, 999999L}; // sleep for almost 1ms
-	struct timeval tv;
-	gettimeofday(&tv, NULL);
 	time_t LastSendSec = tv.tv_sec;
 	time_t LastSendUSec = tv.tv_usec;
 	time_t TimeElapsed;
@@ -192,6 +201,7 @@ int main(int argc, char* argv[])
 		// To sleep for 1ms. This may significantly reduce the CPU usage
 		clock_nanosleep(CLOCK_REALTIME, 0, &tim, NULL);
 		gettimeofday(&tv, NULL);
+		currentDateTime = getDateTime(tv.tv_sec, tv.tv_usec);
 		TimeElapsed = (tv.tv_sec - LastSendSec) * 1000000 + tv.tv_usec - LastSendUSec; // Time elapsed in microseconds since last command send 
 		
 		// read from message queue for any channel
@@ -202,11 +212,10 @@ int main(int argc, char* argv[])
 			// using rChn as the message queue ID
 			if (s_ID != m_buf.rChn)
 			{
-				//m_key = m_buf.rChn;
-				//s_ID = msgget(m_key, 0444 | IPC_CREAT);
-				//printf("\nGet a new key %d, with which creates a message queue of ID %d.\n", m_key, s_ID);
 				s_ID = m_buf.rChn;
-				printf("\nGet a new message queue ID %d.\n", s_ID);
+				printf("\n%s Switch to a new message queue ID %d.\n", currentDateTime.c_str(), s_ID);
+				fprintf(fp, "%s : Switch to a new message queue ID %d.\n", currentDateTime.c_str(), s_ID);
+				fflush(fp);
 			}
 			
 			// get the command from the message queue
@@ -236,8 +245,10 @@ int main(int argc, char* argv[])
 		res = hid_read(handle, buf, sizeof(buf));
 		if (res < 0)
 		{
-			printf("\nUnable to read from the PIC.\n");
-			printf("Error: %ls\n", hid_error(handle));
+			if (ConsolePrint)
+				printf("\n%s : Unable to read from the pic with error %ls\n", currentDateTime.c_str(), hid_error(handle));
+			fprintf(fp, "%s : Error: %ls\n", currentDateTime.c_str(), hid_error(handle));
+			fflush(fp);
 			hid_close(handle);
 			//hid_exit();
 			handle = 0;
@@ -248,23 +259,26 @@ int main(int argc, char* argv[])
 		if (res > 0)
 		{
 			// print the reply from the pic
-			printf("\r%s (%ldus) %ld %02hx: ", getDateTime(LastSendSec, LastSendUSec).c_str(), TimeElapsed, sChn, buf[2]); // print the command byte
-			//for (int i = 3; i < 65; i++)
-			//	if (i < buf[1] + 1)
-			//		if (buf[i] < 32 || buf[i] > 128)
-			//			printf("<%02hx>", buf[i]);
-			//		else printf("%c", buf[i]);
-			//	else
-			//		printf(" ");  // clear previous prints
-			for (int i = 3; i < buf[1] + 1; i++)
-				if (buf[i] < 32 || buf[i] > 128)
-					printf("<%02hx>", buf[i]);
-				else
-					printf("%c", buf[i]);
-				
-			if (buf[2] == 0x25)
-				printf("\n"); // keep the information
+			if (ConsolePrint)
+			{
+				printf("\r%s (%ldus) %ld %02hx: ", getDateTime(LastSendSec, LastSendUSec).c_str(), TimeElapsed, sChn, buf[2]); // print the command byte
+				for (int i = 3; i < buf[1] + 1; i++)
+					if (buf[i] < 32 || buf[i] > 128)
+						printf("<%02hx>", buf[i]);
+					else
+						printf("%c", buf[i]);					
+			}
 			
+			if (buf[2] == 0x25)
+			{
+				// keep the system infomation in the log
+				fprintf(fp, "%s (%ldus) %ld %02hx: ", getDateTime(LastSendSec, LastSendUSec).c_str(), TimeElapsed, sChn, buf[2]); 
+				for (int i = 3; i < buf[1]; i++)
+					fprintf(fp, "%c", buf[i]);
+				fprintf(fp, "\n");
+				fflush(fp);
+			}
+
 			m_buf.sec = tv.tv_sec;
 			m_buf.usec = tv.tv_usec;
 			m_buf.type = 11; // CMD_SERVICEDATA
@@ -276,8 +290,15 @@ int main(int argc, char* argv[])
 					
 			if (s_ID && msgsnd(s_ID, &m_buf, m_buf.len + m_HeaderLength, IPC_NOWAIT))
 			{
-				printf("\n%s (Critical error) Unable to send the message to queue %d. Message is %s.\n", 
-					getDateTime(tv.tv_sec, tv.tv_usec).c_str(), s_ID, m_buf.mText);
+				if (ConsolePrint)
+					printf("\n%s (Critical error) Unable to send the message to queue %d at channel %ld. Message is %s.\n", 
+						currentDateTime.c_str(), s_ID, sChn, m_buf.mText);
+				fprintf(fp, "%s Unable to send the message to queue %d at channel %ld. Message is ", 
+					currentDateTime.c_str(), s_ID, sChn);
+				for (int i = 0; i < m_buf.len - 2; i++)
+					fprintf(fp, "%02hx", m_buf.mText[i]);
+				fprintf(fp, "\n");
+				fflush(fp);
 				s_ID = 0;
 			}
 			
@@ -290,7 +311,11 @@ int main(int argc, char* argv[])
 			if (idle)
 				continue;
 
-			printf("\n%s send command HeartbeatOff\n", getDateTime(tv.tv_sec, tv.tv_usec).c_str()); // print the command byte
+			if (ConsolePrint)
+				printf("\n%s send command HeartbeatOff\n", currentDateTime.c_str()); // print the command byte
+			fprintf(fp, "%s send command HeartbeatOff to pic.\n", currentDateTime.c_str()); // print the command byte
+			fflush(fp);
+
 			commandQueue.append(setHeartbeatOff);
 			idle = true;
 		}
@@ -309,7 +334,10 @@ int main(int argc, char* argv[])
 			res = sendPIC(handle, &commandQueue);
 			if (res < 0)
 			{
-				printf("\nUnable to write to the PIC.\nError: %ls\n", hid_error(handle));
+				if (ConsolePrint)
+					printf("\nUnable to write to the PIC.\nError: %ls\n", hid_error(handle));
+				fprintf(fp, "%s : Unable to write to the PIC.\nError: %ls\n", currentDateTime.c_str(), hid_error(handle));
+				fflush(fp);
 				hid_close(handle);
 				handle = 0;
 			}
